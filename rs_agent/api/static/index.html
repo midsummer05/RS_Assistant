@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>遥感任务工作台</title>
+    <link rel="stylesheet" href="/app/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">RS</div>
+          <div>
+            <h1>遥感任务工作台</h1>
+            <p id="apiStatus">连接中</p>
+          </div>
+        </div>
+
+        <form id="taskForm" class="panel task-form">
+          <label>
+            <span>任务目标</span>
+            <textarea id="goalInput" rows="5">帮我对两期 Sentinel-2 影像做建设用地扩张变化检测，输出图斑、面积统计和报告。</textarea>
+          </label>
+
+          <div class="field-grid">
+            <label>
+              <span>第一期影像</span>
+              <input id="imageT1Input" value="demo://image_t1" />
+            </label>
+            <label>
+              <span>第二期影像</span>
+              <input id="imageT2Input" value="demo://image_t2" />
+            </label>
+          </div>
+
+          <div class="form-row">
+            <label class="toggle">
+              <input id="autoConfirmInput" type="checkbox" />
+              <span></span>
+              自动执行
+            </label>
+            <button class="primary" type="submit">创建任务</button>
+          </div>
+        </form>
+
+        <section class="panel">
+          <div class="section-head">
+            <h2>任务</h2>
+            <button id="refreshTasksBtn" class="icon-button" type="button" title="刷新任务">↻</button>
+          </div>
+          <div id="taskList" class="task-list"></div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <section class="topbar">
+          <div>
+            <p class="eyebrow">当前任务</p>
+            <h2 id="currentTitle">未选择任务</h2>
+          </div>
+          <div class="status-pill" id="currentStatus">idle</div>
+        </section>
+
+        <section id="interruptPanel" class="confirm-band hidden">
+          <div>
+            <p class="eyebrow">人工确认</p>
+            <h3>计划待确认</h3>
+          </div>
+          <button id="approveBtn" class="primary" type="button">批准并执行</button>
+        </section>
+
+        <section class="grid">
+          <div class="panel plan-panel">
+            <div class="section-head">
+              <h2>执行计划</h2>
+              <span id="planConfidence" class="muted"></span>
+            </div>
+            <div id="planList" class="step-list empty-state">暂无计划</div>
+          </div>
+
+          <div class="panel preview-panel">
+            <div class="section-head">
+              <h2>结果预览</h2>
+              <span id="areaSummary" class="muted"></span>
+            </div>
+            <div id="previewBox" class="preview-box empty-state">暂无预览</div>
+          </div>
+        </section>
+
+        <section class="grid lower-grid">
+          <div class="panel">
+            <div class="section-head">
+              <h2>产物</h2>
+              <span id="artifactCount" class="muted"></span>
+            </div>
+            <div id="artifactList" class="artifact-list empty-state">暂无产物</div>
+          </div>
+
+          <div class="panel">
+            <div class="section-head">
+              <h2>知识依据</h2>
+              <span id="contextCount" class="muted"></span>
+            </div>
+            <div id="contextList" class="context-list empty-state">暂无依据</div>
+          </div>
+        </section>
+
+        <section class="panel event-panel">
+          <div class="section-head">
+            <h2>事件流</h2>
+            <button id="refreshDetailBtn" class="icon-button" type="button" title="刷新详情">↻</button>
+          </div>
+          <div id="eventList" class="event-list empty-state">暂无事件</div>
+        </section>
+
+        <section class="panel feedback-panel">
+          <div class="section-head">
+            <h2>结果反馈</h2>
+            <span id="feedbackStatus" class="muted"></span>
+          </div>
+          <form id="feedbackForm" class="feedback-form">
+            <select id="ratingInput">
+              <option value="5">5 分</option>
+              <option value="4" selected>4 分</option>
+              <option value="3">3 分</option>
+              <option value="2">2 分</option>
+              <option value="1">1 分</option>
+            </select>
+            <label class="toggle compact">
+              <input id="acceptedInput" type="checkbox" checked />
+              <span></span>
+              通过
+            </label>
+            <input id="commentInput" placeholder="反馈" />
+            <button type="submit">提交</button>
+          </form>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast hidden"></div>
+    <script src="/app/app.js"></script>
+  </body>
+</html>

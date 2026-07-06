@@ -1,0 +1,73 @@
+# 遥感任务智能助手 MVP
+
+这是根据 `remote_sensing_agent_tech_design.md` 第 20 节实现的最小闭环原型。当前版本聚焦双时相变化检测，使用本地 JSON 文件代替数据库、对象存储和向量库，但保留了后续工程化替换的接口边界。
+
+## 已实现闭环
+
+1. 选择两期影像 URI 或已登记资产。
+2. 用自然语言创建变化检测任务。
+3. Agent 通过 `raster.inspect_metadata` 读取元数据。
+4. 本地 RAG 检索变化检测 SOP、模型卡和工具说明。
+5. 生成结构化计划，并支持人工确认。
+6. 自动执行对齐、NDBI、变化检测、后处理、矢量化、统计、预览和报告。
+7. 每个阶段写入 event 和 checkpoint。
+8. 输出 PNG 预览、GeoJSON 图斑、CSV 面积统计和 Markdown 报告。
+9. 支持用户反馈。
+10. 将任务摘要和反馈写入项目记忆。
+
+## 快速运行
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m rs_agent.demo --auto-confirm
+```
+
+启动 API：
+
+```powershell
+.\.venv\Scripts\uvicorn rs_agent.api.main:app --reload
+```
+
+启动 React 前端开发服务器：
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+打开 React 工作台：
+
+```text
+http://127.0.0.1:5173/
+```
+
+构建后也可以由 FastAPI 直接托管：
+
+```powershell
+cd frontend
+npm run build
+```
+
+```text
+http://127.0.0.1:8000/
+```
+
+创建 demo 任务：
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/tasks `
+  -ContentType "application/json" `
+  -Body '{"user_goal":"帮我对两期 Sentinel-2 影像做建设用地扩张变化检测，输出图斑、面积统计和报告。","image_t1_uri":"demo://image_t1","image_t2_uri":"demo://image_t2","auto_confirm":true}'
+```
+
+默认数据会写入 `.rs_agent_data/`。端到端 demo 使用内置的 `demo://image_t1` 和 `demo://image_t2`，方便在没有真实 GeoTIFF 的情况下验证闭环。
+
+第二阶段已引入 `rasterio`，真实 GeoTIFF/COG 输入会读取 CRS、transform、bbox、分辨率、波段描述等元数据；带地理参考的中间/结果栅格会优先输出 GeoTIFF。
+
+## 测试
+
+```powershell
+.\.venv\Scripts\python -m pytest
+```
