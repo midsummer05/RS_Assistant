@@ -48,20 +48,41 @@ function App() {
     setEvents(taskEvents);
   }
 
-  async function createTask(payload: { goal: string; imageT1: string; imageT2: string; autoConfirm: boolean }) {
+  async function createTask(payload: { goal: string; imageT1: string; imageT2: string; autoConfirm: boolean; agentMode: "workflow" | "agent"; executionBudget: number }) {
     setBusy(true);
     try {
       const task = await api.createTask({
         user_goal: payload.goal,
         image_t1_uri: payload.imageT1,
         image_t2_uri: payload.imageT2,
-        auto_confirm: payload.autoConfirm
+        auto_confirm: payload.autoConfirm,
+        agent_mode: payload.agentMode,
+        execution_budget: payload.agentMode === "agent" ? payload.executionBudget : undefined
       });
       await refreshTasks();
       await selectTask(task.task_id);
       showToast(task.status === "waiting_human" ? "计划已生成，等待确认" : "任务已完成");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "任务创建失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function continueTask() {
+    if (!currentTask) return;
+    setBusy(true);
+    try {
+      const task =
+        currentTask.status === "failed"
+          ? await api.retryTask(currentTask.task_id)
+          : await api.resumeTask(currentTask.task_id);
+      setCurrentTask(task);
+      setEvents(await api.listEvents(task.task_id));
+      await refreshTasks();
+      showToast(task.status === "paused" ? "本轮执行完成，可继续下一批" : "任务已继续执行");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "任务继续失败");
     } finally {
       setBusy(false);
     }
@@ -142,6 +163,23 @@ function App() {
           </section>
         ) : null}
 
+        {currentTask && (currentTask.status === "paused" || currentTask.status === "failed") ? (
+          <section className="confirm-band">
+            <div>
+              <p className="eyebrow">{currentTask.status === "paused" ? "长程任务暂停" : "任务失败"}</p>
+              <h3>
+                {currentTask.status === "paused"
+                  ? "已保存 checkpoint，可从下一批步骤继续。"
+                  : currentTask.working_memory?.last_failure?.message || "可重试最近失败阶段。"}
+              </h3>
+            </div>
+            <button className="primary" disabled={busy} onClick={continueTask}>
+              <Play size={16} />
+              {currentTask.status === "paused" ? "继续执行" : "重试"}
+            </button>
+          </section>
+        ) : null}
+
         <section className="grid">
           <PlanPanel task={currentTask} />
           <PreviewPanel task={currentTask} />
@@ -149,8 +187,10 @@ function App() {
 
         <section className="grid lower-grid">
           <ArtifactPanel task={currentTask} />
-          <ContextPanel chunks={currentTask?.retrieved_context || []} />
+          <QualityPanel task={currentTask} />
         </section>
+
+        <ContextPanel chunks={currentTask?.retrieved_context || []} />
 
         <section className="panel event-panel">
           <div className="section-head">
@@ -189,19 +229,21 @@ function TaskComposer({
   onCreate
 }: {
   busy: boolean;
-  onCreate: (payload: { goal: string; imageT1: string; imageT2: string; autoConfirm: boolean }) => void;
+  onCreate: (payload: { goal: string; imageT1: string; imageT2: string; autoConfirm: boolean; agentMode: "workflow" | "agent"; executionBudget: number }) => void;
 }) {
   const [goal, setGoal] = useState("帮我对两期 Sentinel-2 影像做建设用地扩张变化检测，输出图斑、面积统计和报告。");
   const [imageT1, setImageT1] = useState("demo://image_t1");
   const [imageT2, setImageT2] = useState("demo://image_t2");
   const [autoConfirm, setAutoConfirm] = useState(false);
+  const [agentMode, setAgentMode] = useState<"workflow" | "agent">("agent");
+  const [executionBudget, setExecutionBudget] = useState(3);
 
   return (
     <form
       className="panel task-form"
       onSubmit={(event) => {
         event.preventDefault();
-        onCreate({ goal, imageT1, imageT2, autoConfirm });
+        onCreate({ goal, imageT1, imageT2, autoConfirm, agentMode, executionBudget });
       }}
     >
       <label>
@@ -217,6 +259,21 @@ function TaskComposer({
           <span>第二期影像</span>
           <input value={imageT2} onChange={(event) => setImageT2(event.target.value)} />
         </label>
+      </div>
+      <div className="form-row">
+        <label>
+          <span>执行模式</span>
+          <select value={agentMode} onChange={(event) => setAgentMode(event.target.value as "workflow" | "agent")}>
+            <option value="agent">真实模型 Agent</option>
+            <option value="workflow">固定 Workflow</option>
+          </select>
+        </label>
+        {agentMode === "agent" ? (
+          <label>
+            <span>每轮步骤数</span>
+            <input type="number" min={1} max={100} value={executionBudget} onChange={(event) => setExecutionBudget(Number(event.target.value))} />
+          </label>
+        ) : null}
       </div>
       <div className="form-row">
         <label className="toggle">
@@ -382,6 +439,44 @@ function ArtifactPanel({ task }: { task: TaskState | null }) {
           ))
         ) : (
           <div className="empty-state">暂无产物</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function QualityPanel({ task }: { task: TaskState | null }) {
+  const gates = [
+    ["输入质量", task?.working_memory?.input_quality],
+    ["配准质量", task?.working_memory?.alignment_quality],
+    ["结果质量", task?.working_memory?.change_result_quality]
+  ] as const;
+  return (
+    <div className="panel">
+      <div className="section-head">
+        <h2>质量门</h2>
+        <span className="muted">{task?.working_memory?.quality?.score != null ? `总分 ${task.working_memory.quality.score}` : ""}</span>
+      </div>
+      <div className="context-list">
+        {gates.some(([, value]) => value) ? (
+          gates.map(([name, value]) =>
+            value ? (
+              <div className="context" key={name}>
+                <div className="context-title">
+                  {value.passed ? <Check size={15} /> : <Clock size={15} />}
+                  {name}
+                  <StatusBadge status={value.passed ? "succeeded" : "failed"} />
+                </div>
+                <div className="context-body">
+                  {value.recommendation || ""}
+                  {value.correlation != null ? ` 相关性：${Number(value.correlation).toFixed(3)}` : ""}
+                  {value.changed_ratio != null ? ` 变化比例：${(Number(value.changed_ratio) * 100).toFixed(2)}%` : ""}
+                </div>
+              </div>
+            ) : null
+          )
+        ) : (
+          <div className="empty-state">质量检查尚未执行</div>
         )}
       </div>
     </div>

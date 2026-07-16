@@ -14,6 +14,13 @@ def generate_markdown(context: ToolContext, params: Dict[str, Any]) -> ToolResul
     output_alias = params.get("output_alias", "markdown_report")
     area_summary = state.working_memory.get("area_statistics", {}).get("summary", {})
     quality = state.working_memory.get("quality", {})
+    input_quality = state.working_memory.get("input_quality", {})
+    alignment_quality = state.working_memory.get("alignment_quality", {})
+    result_quality = state.working_memory.get("change_result_quality", {})
+    change_artifact = None
+    if "change_raster" in state.artifact_refs:
+        change_artifact = state.artifact_by_alias("change_raster")
+    model_id = change_artifact.metadata.get("model_id") if change_artifact else "unknown"
     citations = [
         f"- `{chunk.chunk_id}`：{chunk.title}（{chunk.metadata.get('citation', chunk.source_type)}）"
         for chunk in state.retrieved_context
@@ -34,7 +41,14 @@ def generate_markdown(context: ToolContext, params: Dict[str, Any]) -> ToolResul
 
 ## 方法摘要
 
-系统按最小闭环执行：读取元数据、双时相对齐、计算 NDBI、使用规则型建设用地扩张模型进行变化检测、过滤小图斑、矢量化、统计面积并生成预览图。
+系统按长程变化检测流程执行：读取元数据、输入适用性诊断、双时相对齐、配准质量检查、特征构建、模型推理、结果合理性检查、后处理、矢量化、统计和预览。
+
+- 变化检测模型：{model_id}
+- 输入质量门：{input_quality.get('passed', 'pending')}
+- 配准质量门：{alignment_quality.get('passed', 'pending')}
+- 配准相关性：{alignment_quality.get('correlation', 'pending')}
+- 结果质量门：{result_quality.get('passed', 'pending')}
+- 原始变化比例：{result_quality.get('changed_ratio', 'pending')}
 
 ## 面积统计
 
@@ -62,7 +76,7 @@ def generate_markdown(context: ToolContext, params: Dict[str, Any]) -> ToolResul
 
 ## 限制说明
 
-当前 MVP 使用轻量规则模型和本地文件存储，适合验证闭环；生产环境应接入严格的重投影/重采样、云掩膜、模型服务、空间数据库和人工质检流程。
+当前系统已加入质量门和 BIT 深度模型，但 `raster.align_pair` 仍采用公共尺寸裁剪策略。生产环境仍应接入严格的重投影、亚像素配准、云/云影掩膜、分布外检测和抽样精度验证。
 """
     path = context.artifact_path("outputs", f"{output_alias}.md")
     Path(path).write_text(text, encoding="utf-8")
@@ -80,4 +94,3 @@ def generate_markdown(context: ToolContext, params: Dict[str, Any]) -> ToolResul
         artifacts=[artifact],
         logs=["generated markdown report"],
     )
-

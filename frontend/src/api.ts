@@ -9,6 +9,8 @@ export interface CreateTaskPayload {
   user_id?: string;
   project_id?: string;
   auto_confirm?: boolean;
+  agent_mode?: "workflow" | "agent";
+  execution_budget?: number;
 }
 
 export interface FeedbackPayload {
@@ -49,6 +51,16 @@ export const api = {
     }),
   approvePlan: (taskId: string, interruptId: string) =>
     request<TaskState>(`/api/tasks/${taskId}/interrupts/${interruptId}/approve`, {
+      method: "POST",
+      body: "{}"
+    }),
+  resumeTask: (taskId: string) =>
+    request<TaskState>(`/api/tasks/${taskId}/resume`, {
+      method: "POST",
+      body: "{}"
+    }),
+  retryTask: (taskId: string) =>
+    request<TaskState>(`/api/tasks/${taskId}/retry`, {
       method: "POST",
       body: "{}"
     }),

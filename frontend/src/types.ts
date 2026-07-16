@@ -3,6 +3,7 @@ export type TaskStatus =
   | "planning"
   | "waiting_human"
   | "running"
+  | "paused"
   | "finalizing"
   | "succeeded"
   | "failed"
@@ -79,6 +80,8 @@ export interface TaskState {
   interrupts: Interrupt[];
   working_memory: Record<string, any>;
   user_feedback: Record<string, unknown>[];
+  agent_mode: "workflow" | "agent";
+  execution_budget?: number | null;
   updated_at: string;
   created_at: string;
 }

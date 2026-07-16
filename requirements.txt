@@ -6,3 +6,6 @@ numpy>=2,<3
 pillow>=10,<12
 python-multipart>=0.0.9,<1
 rasterio>=1.4,<2
+torch>=2.2,<3
+torchvision>=0.17,<1
+einops>=0.7,<1

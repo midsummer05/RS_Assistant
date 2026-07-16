@@ -29,6 +29,10 @@ def test_change_detection_minimum_loop_with_plan_review(tmp_path):
     assert final.working_memory["metadata_t2"]["acquired_at"] == "2025-07-01"
     assert final.working_memory["area_statistics"]["summary"]["area_m2"] > 0
     assert final.working_memory["quality"]["passed"] is True
+    assert final.working_memory["input_quality"]["passed"] is True
+    assert final.working_memory["alignment_quality"]["passed"] is True
+    assert final.working_memory["change_result_quality"]["passed"] is True
+    assert len(final.plan) == 13
 
     report_path = Path(final.artifact_by_alias("markdown_report").uri)
     assert report_path.exists()
@@ -52,3 +56,13 @@ def test_change_detection_minimum_loop_with_plan_review(tmp_path):
     assert memories
     assert "人工抽查" in memories[-1].content
 
+    next_task = runtime.create_task(
+        user_goal="继续执行建设用地变化检测，并参考之前关于人工抽查的反馈。",
+        image_t1="demo://image_t1",
+        image_t2="demo://image_t2",
+        user_id="tester",
+        project_id="project_demo",
+        auto_confirm=False,
+    )
+    assert next_task.status == "waiting_human"
+    assert next_task.working_memory["retrieved_memory_count"] >= 1

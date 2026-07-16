@@ -24,6 +24,7 @@ TaskStatus = Literal[
     "planning",
     "waiting_human",
     "running",
+    "paused",
     "finalizing",
     "succeeded",
     "failed",
@@ -99,6 +100,8 @@ class KnowledgeChunk(BaseModel):
     task_tags: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     score: float = 0.0
+    document_id: Optional[str] = None
+    version: Optional[str] = None
 
 
 class MemoryRecord(BaseModel):
@@ -112,6 +115,12 @@ class MemoryRecord(BaseModel):
     source_task_id: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    scope: Literal["session", "user", "project", "global"] = "project"
+    status: Literal["active", "archived", "superseded"] = "active"
+    importance: float = 0.5
+    expires_at: Optional[datetime] = None
+    last_accessed_at: Optional[datetime] = None
+    access_count: int = 0
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -145,6 +154,8 @@ class TaskState(BaseModel):
     artifacts: Dict[str, Artifact] = Field(default_factory=dict)
     artifact_refs: Dict[str, str] = Field(default_factory=dict)
     working_memory: Dict[str, Any] = Field(default_factory=dict)
+    agent_mode: Literal["workflow", "agent"] = "workflow"
+    execution_budget: Optional[int] = None
     retrieved_context: List[KnowledgeChunk] = Field(default_factory=list)
     interrupts: List[Interrupt] = Field(default_factory=list)
     user_feedback: List[Dict[str, Any]] = Field(default_factory=list)
@@ -189,4 +200,3 @@ class TaskState(BaseModel):
     def artifact_by_alias(self, alias: str) -> Artifact:
         artifact_id = self.artifact_refs[alias]
         return self.artifacts[artifact_id]
-

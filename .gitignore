@@ -1,6 +1,7 @@
 .venv/
 .rs_agent_data/
 .rs_agent_data_demo/
+.rs_agent_data_*/
 __pycache__/
 .pytest_cache/
 *.pyc

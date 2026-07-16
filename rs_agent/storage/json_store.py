@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from rs_agent.agent.state import AssetRecord, Event, MemoryRecord, TaskState, utc_now
+from rs_agent.knowledge.embeddings import build_embedder_from_env
+from rs_agent.storage.knowledge_memory_store import KnowledgeMemoryStore
 
 
 class JsonFileStore:
@@ -23,6 +25,10 @@ class JsonFileStore:
         self.memories_dir = self.root / "memories"
         self.uploads_dir = self.root / "uploads"
         self.assets_dir = self.root / "assets"
+        self.knowledge_memory = KnowledgeMemoryStore(
+            self.root / "knowledge_memory.sqlite3",
+            embedder=build_embedder_from_env(),
+        )
         for directory in [
             self.tasks_dir,
             self.events_dir,
@@ -33,6 +39,7 @@ class JsonFileStore:
             self.assets_dir,
         ]:
             directory.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_memories()
 
     def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,10 +122,8 @@ class JsonFileStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def save_memory(self, memory: MemoryRecord) -> None:
-        path = self.memories_dir / "memories.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(memory.model_dump_json() + "\n")
+    def save_memory(self, memory: MemoryRecord) -> MemoryRecord:
+        return self.knowledge_memory.save_memory(memory)
 
     def list_memories(
         self,
@@ -126,23 +131,43 @@ class JsonFileStore:
         project_id: Optional[str] = None,
         tags: Optional[Iterable[str]] = None,
     ) -> List[MemoryRecord]:
+        return self.knowledge_memory.list_memories(
+            user_id=user_id,
+            project_id=project_id,
+            tags=tags,
+        )
+
+    def search_memories(
+        self,
+        query: str,
+        user_id: str,
+        project_id: Optional[str],
+        tags: Optional[List[str]] = None,
+        limit: int = 5,
+    ) -> List[MemoryRecord]:
+        return self.knowledge_memory.search_memories(
+            query=query,
+            user_id=user_id,
+            project_id=project_id,
+            tags=tags,
+            limit=limit,
+        )
+
+    def archive_memory(self, memory_id: str) -> None:
+        self.knowledge_memory.archive_memory(memory_id)
+
+    def purge_expired_memories(self) -> int:
+        return self.knowledge_memory.purge_expired_memories()
+
+    def _migrate_legacy_memories(self) -> None:
         path = self.memories_dir / "memories.jsonl"
-        if not path.exists():
-            return []
-        wanted_tags = set(tags or [])
-        records: List[MemoryRecord] = []
+        marker = self.memories_dir / ".sqlite_migrated"
+        if marker.exists() or not path.exists():
+            return
         for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = MemoryRecord.model_validate(json.loads(line))
-            if user_id and record.user_id != user_id:
-                continue
-            if project_id and record.project_id not in {project_id, None}:
-                continue
-            if wanted_tags and not wanted_tags.intersection(record.tags):
-                continue
-            records.append(record)
-        return records
+            if line.strip():
+                self.knowledge_memory.save_memory(MemoryRecord.model_validate(json.loads(line)))
+        marker.write_text(utc_now().isoformat(), encoding="utf-8")
 
     def _asset_index_path(self) -> Path:
         return self.assets_dir / "assets.json"
@@ -173,4 +198,3 @@ class JsonFileStore:
         if sensor:
             assets = [asset for asset in assets if asset.sensor == sensor]
         return assets
-

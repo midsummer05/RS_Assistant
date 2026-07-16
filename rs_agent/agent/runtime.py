@@ -16,14 +16,16 @@ class AgentRuntime:
     def __init__(
         self,
         store: JsonFileStore,
-        planner: DeterministicPlanner,
+        planner: Any,
         rag: LocalRagRetriever,
         memory: MemoryService,
         executor: ToolExecutor,
         events: EventBus,
+        agent_planner: Any = None,
     ) -> None:
         self.store = store
         self.planner = planner
+        self.agent_planner = agent_planner
         self.rag = rag
         self.memory = memory
         self.executor = executor
@@ -37,6 +39,8 @@ class AgentRuntime:
         user_id: str = "local_user",
         project_id: Optional[str] = "default_project",
         auto_confirm: bool = False,
+        agent_mode: str = "workflow",
+        execution_budget: Optional[int] = None,
     ) -> TaskState:
         state = TaskState(
             user_id=user_id,
@@ -50,6 +54,8 @@ class AgentRuntime:
                 },
                 "requires_human_review": not auto_confirm,
             },
+            agent_mode=agent_mode,
+            execution_budget=execution_budget,
         )
         self.store.save_task(state)
         self.events.emit(
@@ -61,12 +67,18 @@ class AgentRuntime:
 
     def run_task(self, task_id: str) -> TaskState:
         state = self.store.load_latest_checkpoint(task_id)
+        executed_this_run = 0
+
+        if state.status == "paused":
+            state.status = "running"
+            self.events.emit(task_id, "TaskResumed", {})
 
         while not state.is_finished:
             self.store.save_checkpoint(state, f"status_{state.status}")
 
             if state.status == "created":
-                state = self.planner.understand(state)
+                planner = self._planner_for(state)
+                state = planner.understand(state)
                 state.status = "planning"
                 self.events.emit(
                     task_id,
@@ -77,6 +89,7 @@ class AgentRuntime:
                 continue
 
             if state.status == "planning":
+                planner = self._planner_for(state)
                 context = self.rag.retrieve_for_planning(state)
                 memories = self.memory.retrieve_relevant(state)
                 state.retrieved_context = context
@@ -89,7 +102,43 @@ class AgentRuntime:
                         "memory_count": len(memories),
                     },
                 )
-                plan = self.planner.generate_plan(state, context, memories)
+                if state.agent_mode == "agent":
+                    self.events.emit(
+                        task_id,
+                        "LLMCallStarted",
+                        {"purpose": "planning", "model": planner.model.model_name},
+                    )
+                try:
+                    plan = planner.generate_plan(state, context, memories)
+                except Exception as exc:
+                    state.status = "failed"
+                    state.working_memory["last_failure"] = {
+                        "stage": "planning",
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                    self.events.emit(
+                        task_id,
+                        "LLMCallFailed",
+                        {
+                            "purpose": "planning",
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    )
+                    self.store.save_checkpoint(state, "failed_planning")
+                    self.store.save_task(state)
+                    return state
+                if state.agent_mode == "agent":
+                    self.events.emit(
+                        task_id,
+                        "LLMCallSucceeded",
+                        {
+                            "purpose": "planning",
+                            "model": planner.model.model_name,
+                            "step_count": len(plan.steps),
+                        },
+                    )
                 state.attach_plan(plan)
                 self.events.emit(
                     task_id,
@@ -125,6 +174,23 @@ class AgentRuntime:
                 return state
 
             if state.status == "running":
+                if (
+                    state.execution_budget is not None
+                    and executed_this_run >= state.execution_budget
+                    and state.next_pending_step() is not None
+                ):
+                    state.status = "paused"
+                    self.events.emit(
+                        task_id,
+                        "TaskPaused",
+                        {
+                            "reason": "execution_budget_reached",
+                            "executed_steps": executed_this_run,
+                        },
+                    )
+                    self.store.save_checkpoint(state, "paused_execution_budget")
+                    self.store.save_task(state)
+                    return state
                 step = state.next_pending_step()
                 if step is None:
                     state.status = "finalizing"
@@ -134,15 +200,56 @@ class AgentRuntime:
                     state.working_memory["quality"] = self.evaluate_quality(state)
 
                 try:
-                    self._execute_step(state, step.step_id)
+                    result = self._execute_step(state, step.step_id)
                 except ToolError as exc:
+                    step.status = "failed"
+                    step.finished_at = utc_now()
+                    step.error = {
+                        "tool_name": exc.tool_name,
+                        "code": exc.code,
+                        "message": exc.message,
+                    }
                     state.status = "failed"
+                    state.working_memory["last_failure"] = {
+                        "stage": "tool_execution",
+                        "step_id": step.step_id,
+                        **step.error,
+                    }
                     self.events.emit(
                         task_id,
                         "ToolCallFailed",
                         {"tool_name": exc.tool_name, "code": exc.code, "message": exc.message},
                     )
                     self.store.save_checkpoint(state, f"failed_{step.step_id}")
+                    self.store.save_task(state)
+                    return state
+                executed_this_run += 1
+                if step.quality_gate and result.outputs.get("passed") is False:
+                    interrupt = Interrupt(
+                        type="quality_gate_review",
+                        reason=(
+                            f"质量门 {step.quality_gate} 未通过："
+                            f"{result.outputs.get('recommendation', '请人工复核后决定是否继续。')}"
+                        ),
+                        payload={
+                            "step_id": step.step_id,
+                            "quality_gate": step.quality_gate,
+                            "result": result.outputs,
+                        },
+                    )
+                    state.add_interrupt(interrupt)
+                    state.status = "waiting_human"
+                    self.events.emit(
+                        task_id,
+                        "QualityGateFailed",
+                        {
+                            "interrupt_id": interrupt.interrupt_id,
+                            "step_id": step.step_id,
+                            "quality_gate": step.quality_gate,
+                            "issues": result.outputs.get("issues", []),
+                        },
+                    )
+                    self.store.save_checkpoint(state, f"waiting_{step.quality_gate}")
                     self.store.save_task(state)
                     return state
                 continue
@@ -168,6 +275,43 @@ class AgentRuntime:
         self.store.save_task(state)
         return state
 
+    def retry_task(self, task_id: str) -> TaskState:
+        state = self.store.load_task(task_id)
+        if state.status != "failed":
+            raise ValueError("Only failed tasks can be retried.")
+        failure = state.working_memory.get("last_failure", {})
+        if failure.get("stage") == "planning":
+            state.status = "planning"
+        elif failure.get("stage") == "tool_execution":
+            step_id = failure.get("step_id")
+            step = next((item for item in state.plan if item.step_id == step_id), None)
+            if step is None:
+                raise ValueError("Failed step is missing from the task plan.")
+            step.status = "pending"
+            step.error = None
+            step.started_at = None
+            step.finished_at = None
+            state.status = "running"
+        else:
+            raise ValueError("Task failure is not retryable.")
+        state.working_memory.pop("last_failure", None)
+        self.events.emit(task_id, "TaskRetryRequested", {"previous_failure": failure})
+        self.store.save_checkpoint(state, "retry_requested")
+        self.store.save_task(state)
+        return self.run_task(task_id)
+
+    def supports_agent_mode(self) -> bool:
+        return self.agent_planner is not None
+
+    def _planner_for(self, state: TaskState) -> Any:
+        if state.agent_mode == "agent":
+            if self.agent_planner is None:
+                raise RuntimeError(
+                    "Agent mode requires RS_AGENT_LLM_API_KEY and RS_AGENT_LLM_MODEL."
+                )
+            return self.agent_planner
+        return self.planner
+
     def approve_interrupt(self, task_id: str, interrupt_id: str) -> TaskState:
         state = self.store.load_task(task_id)
         interrupt = state.get_open_interrupt(interrupt_id)
@@ -176,6 +320,18 @@ class AgentRuntime:
         interrupt.status = "approved"
         interrupt.resolved_at = utc_now()
         state.status = "running"
+        if interrupt.type == "quality_gate_review":
+            memory = self.memory.write_human_decision(
+                state,
+                decision_type=str(interrupt.payload.get("quality_gate", "quality_gate")),
+                reason=interrupt.reason,
+                payload=interrupt.payload,
+            )
+            self.events.emit(
+                task_id,
+                "HumanDecisionMemoryWritten",
+                {"memory_id": memory.memory_id, "interrupt_id": interrupt_id},
+            )
         self.events.emit(task_id, "HumanInterruptApproved", {"interrupt_id": interrupt_id})
         self.store.save_checkpoint(state, "plan_approved")
         self.store.save_task(state)
@@ -247,14 +403,47 @@ class AgentRuntime:
         if step_id == "s01_metadata":
             state.working_memory["metadata_t1"] = outputs.get("metadata_t1")
             state.working_memory["metadata_t2"] = outputs.get("metadata_t2")
-        if step_id == "s08_area_statistics":
+        if step_id == "s11_area_statistics":
             state.working_memory["area_statistics"] = outputs
+        if step_id == "s02_input_quality":
+            state.working_memory["input_quality"] = outputs
+        if step_id == "s04_alignment_quality":
+            state.working_memory["alignment_quality"] = outputs
+        if step_id == "s08_result_quality":
+            state.working_memory["change_result_quality"] = outputs
 
     def evaluate_quality(self, state: TaskState) -> Dict[str, Any]:
         metadata_t1 = state.working_memory.get("metadata_t1") or {}
         metadata_t2 = state.working_memory.get("metadata_t2") or {}
         area_summary = state.working_memory.get("area_statistics", {}).get("summary", {})
+        input_quality = state.working_memory.get("input_quality", {})
+        alignment_quality = state.working_memory.get("alignment_quality", {})
+        result_quality = state.working_memory.get("change_result_quality", {})
         checks: List[Dict[str, Any]] = []
+        if input_quality:
+            checks.append(
+                {
+                    "name": "input_quality_gate",
+                    "passed": bool(input_quality.get("passed")),
+                    "details": input_quality.get("recommendation", ""),
+                }
+            )
+        if alignment_quality:
+            checks.append(
+                {
+                    "name": "alignment_quality_gate",
+                    "passed": bool(alignment_quality.get("passed")),
+                    "details": f"correlation={alignment_quality.get('correlation')}",
+                }
+            )
+        if result_quality:
+            checks.append(
+                {
+                    "name": "change_result_quality_gate",
+                    "passed": bool(result_quality.get("passed")),
+                    "details": result_quality.get("recommendation", ""),
+                }
+            )
         same_crs = metadata_t1.get("crs") == metadata_t2.get("crs")
         checks.append({"name": "metadata_crs_consistency", "passed": same_crs, "details": "两期 CRS 一致" if same_crs else "两期 CRS 不一致"})
         has_vector = "change_vector" in state.artifact_refs
@@ -275,4 +464,3 @@ class AgentRuntime:
 
     def _title_from_goal(self, user_goal: str) -> str:
         return user_goal[:40] or "遥感变化检测任务"
-

@@ -1,0 +1,31 @@
+
+from pathlib import Path
+
+
+BIT_CD_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = BIT_CD_DIR.parents[1]
+LOCAL_LEVIR_VAL_DIR = BACKEND_DIR / "data" / "raw" / "LEVIR_CD" / "val"
+
+
+class DataConfig:
+    data_name = ""
+    root_dir = ""
+    label_transform = "norm"
+    def get_data_config(self, data_name):
+        self.data_name = data_name
+        if data_name == 'LEVIR':
+            self.root_dir = str(LOCAL_LEVIR_VAL_DIR)
+        elif data_name == 'LEVIR_VAL':
+            self.root_dir = str(LOCAL_LEVIR_VAL_DIR)
+        elif data_name == 'quick_start':
+            self.root_dir = './samples/'
+        else:
+            raise TypeError('%s has not defined' % data_name)
+        return self
+
+
+if __name__ == '__main__':
+    data = DataConfig().get_data_config(data_name='LEVIR')
+    print(data.data_name)
+    print(data.root_dir)
+    print(data.label_transform)

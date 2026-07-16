@@ -12,12 +12,13 @@ class MemoryService:
 
     def retrieve_relevant(self, state: TaskState, limit: int = 5) -> List[MemoryRecord]:
         tags = [state.task_type or "change_detection"]
-        memories = self.store.list_memories(
+        return self.store.search_memories(
+            query=state.user_goal,
             user_id=state.user_id,
             project_id=state.project_id,
             tags=tags,
+            limit=limit,
         )
-        return memories[-limit:]
 
     def write_from_task(self, state: TaskState) -> MemoryRecord:
         area_summary = state.working_memory.get("area_statistics", {})
@@ -34,15 +35,20 @@ class MemoryService:
             title="变化检测任务结果摘要",
             content=content,
             confidence=0.82,
+            scope="project",
+            importance=0.65,
             source_task_id=state.task_id,
             tags=[state.task_type or "change_detection", "task_summary"],
             metadata={
                 "artifact_refs": state.artifact_refs,
                 "quality": quality,
+                "input_quality": state.working_memory.get("input_quality"),
+                "alignment_quality": state.working_memory.get("alignment_quality"),
+                "change_result_quality": state.working_memory.get("change_result_quality"),
+                "model_id": self._model_id(state),
             },
         )
-        self.store.save_memory(memory)
-        return memory
+        return self.store.save_memory(memory)
 
     def write_feedback(
         self,
@@ -64,10 +70,37 @@ class MemoryService:
             title="用户对变化检测结果的反馈",
             content=content,
             confidence=1.0,
+            scope="project",
+            importance=0.9 if accepted is False else 0.75,
             source_task_id=state.task_id,
             tags=[state.task_type or "change_detection", "feedback"],
             metadata=metadata or {},
         )
-        self.store.save_memory(memory)
-        return memory
+        return self.store.save_memory(memory)
 
+    def write_human_decision(
+        self,
+        state: TaskState,
+        decision_type: str,
+        reason: str,
+        payload: Dict[str, Any],
+    ) -> MemoryRecord:
+        memory = MemoryRecord(
+            user_id=state.user_id,
+            project_id=state.project_id,
+            memory_type="human_decision",
+            title=f"人工决策：{decision_type}",
+            content=f"任务 {state.task_id} 中，用户批准继续执行。原因：{reason}",
+            confidence=1.0,
+            source_task_id=state.task_id,
+            tags=[state.task_type or "change_detection", "human_decision", decision_type],
+            metadata=payload,
+            scope="project",
+            importance=0.9,
+        )
+        return self.store.save_memory(memory)
+
+    def _model_id(self, state: TaskState) -> str | None:
+        if "change_raster" not in state.artifact_refs:
+            return None
+        return state.artifact_by_alias("change_raster").metadata.get("model_id")

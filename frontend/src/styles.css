@@ -335,8 +335,10 @@ textarea {
 .status-running,
 .status-planning,
 .status-waiting_human,
+.status-paused,
 .badge.running,
-.badge.waiting_human {
+.badge.waiting_human,
+.badge.paused {
   color: var(--warn);
   background: #fff4df;
   border-color: #f0d29f;

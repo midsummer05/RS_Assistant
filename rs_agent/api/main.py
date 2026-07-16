@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -33,6 +34,8 @@ class CreateTaskRequest(BaseModel):
     user_id: str = "local_user"
     project_id: str = "default_project"
     auto_confirm: bool = False
+    agent_mode: str = Field(default="workflow", pattern="^(workflow|agent)$")
+    execution_budget: Optional[int] = Field(default=None, ge=1, le=100)
 
 
 class FeedbackRequest(BaseModel):
@@ -53,6 +56,19 @@ class RegisterAssetRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class KnowledgeSearchRequest(BaseModel):
+    query: str
+    limit: int = Field(default=5, ge=1, le=50)
+
+
+class MemorySearchRequest(BaseModel):
+    query: str
+    user_id: str = "local_user"
+    project_id: Optional[str] = "default_project"
+    tags: List[str] = Field(default_factory=list)
+    limit: int = Field(default=5, ge=1, le=50)
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -69,6 +85,10 @@ def workspace() -> FileResponse:
 @app.post("/api/tasks")
 def create_task(request: CreateTaskRequest) -> Dict[str, Any]:
     try:
+        if request.agent_mode == "agent" and not runtime.supports_agent_mode():
+            raise ValueError(
+                "Agent mode requires RS_AGENT_LLM_API_KEY and RS_AGENT_LLM_MODEL."
+            )
         image_t1, image_t2 = _resolve_inputs(request)
         state = runtime.create_task(
             user_goal=request.user_goal,
@@ -77,6 +97,8 @@ def create_task(request: CreateTaskRequest) -> Dict[str, Any]:
             user_id=request.user_id,
             project_id=request.project_id,
             auto_confirm=request.auto_confirm,
+            agent_mode=request.agent_mode,
+            execution_budget=request.execution_budget,
         )
         return state.model_dump(mode="json")
     except Exception as exc:
@@ -102,6 +124,16 @@ def resume_task(task_id: str) -> Dict[str, Any]:
         return runtime.run_task(task_id).model_dump(mode="json")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/tasks/{task_id}/retry")
+def retry_task(task_id: str) -> Dict[str, Any]:
+    try:
+        return runtime.retry_task(task_id).model_dump(mode="json")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/tasks/{task_id}/events")
@@ -202,18 +234,106 @@ def get_asset(asset_id: str) -> Dict[str, Any]:
 
 
 @app.get("/api/memories")
-def list_memories(user_id: Optional[str] = None, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_memories(
+    user_id: str = "local_user",
+    project_id: Optional[str] = "default_project",
+) -> List[Dict[str, Any]]:
     return [
         memory.model_dump(mode="json")
         for memory in runtime.store.list_memories(user_id=user_id, project_id=project_id)
     ]
 
 
+@app.post("/api/memories/search")
+def search_memories(request: MemorySearchRequest) -> List[Dict[str, Any]]:
+    return [
+        memory.model_dump(mode="json")
+        for memory in runtime.store.search_memories(
+            query=request.query,
+            user_id=request.user_id,
+            project_id=request.project_id,
+            tags=request.tags,
+            limit=request.limit,
+        )
+    ]
+
+
+@app.delete("/api/memories/{memory_id}")
+def archive_memory(memory_id: str) -> Dict[str, str]:
+    try:
+        runtime.store.archive_memory(memory_id)
+        return {"status": "archived", "memory_id": memory_id}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/memories/purge-expired")
+def purge_expired_memories() -> Dict[str, int]:
+    return {"purged": runtime.store.purge_expired_memories()}
+
+
 @app.post("/api/knowledge/search")
-def search_knowledge(request: Dict[str, Any]) -> List[Dict[str, Any]]:
-    query = request.get("query", "")
-    limit = int(request.get("limit", 5))
-    return [chunk.model_dump(mode="json") for chunk in runtime.rag.search(query, limit=limit)]
+def search_knowledge(request: KnowledgeSearchRequest) -> List[Dict[str, Any]]:
+    return [
+        chunk.model_dump(mode="json")
+        for chunk in runtime.rag.search(request.query, limit=request.limit)
+    ]
+
+
+@app.get("/api/knowledge/documents")
+def list_knowledge_documents() -> List[Dict[str, Any]]:
+    return runtime.store.knowledge_memory.list_documents()
+
+
+@app.get("/api/knowledge/stats")
+def knowledge_memory_stats() -> Dict[str, Any]:
+    return runtime.store.knowledge_memory.stats()
+
+
+@app.post("/api/knowledge/documents/upload")
+def upload_knowledge_document(
+    file: UploadFile = File(...),
+    source_type: str = "document",
+    version: str = "1",
+    task_tags: str = "change_detection",
+) -> Dict[str, Any]:
+    safe_name = Path(file.filename or "knowledge.txt").name
+    source_dir = runtime.store.root / "knowledge_sources"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    path = source_dir / f"{uuid4().hex}_{safe_name}"
+    written = 0
+    maximum_size = 10 * 1024 * 1024
+    with path.open("wb") as handle:
+        while chunk := file.file.read(1024 * 1024):
+            written += len(chunk)
+            if written > maximum_size:
+                handle.close()
+                path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="Knowledge document exceeds 10 MB.")
+            handle.write(chunk)
+    try:
+        result = runtime.store.knowledge_memory.ingest_document(
+            path,
+            source_type=source_type,
+            version=version,
+            task_tags=[tag.strip() for tag in task_tags.split(",") if tag.strip()],
+            metadata={"original_filename": file.filename},
+        )
+        if result.get("duplicate"):
+            path.unlink(missing_ok=True)
+        return result
+    except ValueError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/knowledge/documents/{document_id}")
+def delete_knowledge_document(document_id: str) -> Dict[str, str]:
+    try:
+        runtime.store.knowledge_memory.delete_document(document_id)
+        return {"status": "deleted", "document_id": document_id}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def _resolve_inputs(request: CreateTaskRequest) -> tuple[str, str]:
